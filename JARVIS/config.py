@@ -9,5 +9,6 @@ DEVICE = os.getenv("DEVICE", "cpu")  # cpu или cuda
 
 # LLM API
 LLM_URL = os.getenv("LLM_URL", "https://api.intelligence.io.solutions/api/v1/chat/completions")
-LLM_TOKEN = ("io-v2-eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJvd25lciI6IjA4ZjI3MDhhLWNlZGItNGJjYy1iYjc0LTg3Nzk4ZmZlNjk"
-             "xMCIsImV4cCI6NDkwNjc2Mjg0NX0.lZsysp2ZNYAdV1htzfWnX-8uef5HGi7Z_qlzEVsPLxFvvj7i9oVpy3-o0pXGGtZLFYf-41kfv78g6UTDNkFSow")
+LLM_TOKEN = ("io-v2-eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJvd25lciI6IjRkZTkyZWNmLWRlMzEtNDRiZC1iZ"
+                     "WVmLTNhZTRjNjAyNDkzNiIsImV4cCI6NDkyMDg2ODA1M30.VN9L1ofY-yqhCO4bXLxkL14H5xi-2VVZ9NRVe5Le9uS"
+                     "PpPZNhxX3lEqhrcGvAYl9F7E-yMLFPtvyOwkcejZgdA")

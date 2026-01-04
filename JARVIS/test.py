@@ -1,28 +1,26 @@
-import requests
+import base64, requests
+from JARVIS.config import LLM_TOKEN
 
-url = "https://api.intelligence.io.solutions/api/v1/chat/completions"
-
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": "Bearer io-v2-eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJvd25lciI6IjA4ZjI3MDhhLWNlZGItNGJjYy1iYjc"
-                     "0LTg3Nzk4ZmZlNjkxMCIsImV4cCI6NDkwNjc2Mjg0NX0.lZsysp2ZNYAdV1htzfWnX-8uef5HGi7Z_qlzEVsPLxFvvj7i"
-                     "9oVpy3-o0pXGGtZLFYf-41kfv78g6UTDNkFSow"
-}
+with open("screenshot.png", "rb") as f:
+    img_b64 = base64.b64encode(f.read()).decode("utf-8")
 
 data = {
-    "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+    "model": "meta-llama/Llama-3.2-90B-Vision-Instruct",
     "messages": [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant. Be brief"
-        },
-        {
-            "role": "user",
-            "content": "Hello!"
-        }
+        {"role": "system", "content": "Ты мульти-модальная модель, анализируй картинку."},
+        {"role": "user", "content": [
+            {"type": "text", "text": "Опиши, что на изображении и прочитай текст, если он есть."},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{img_b64}"}
+            }
+        ]}
     ]
 }
 
-response = requests.post(url, headers=headers, json=data)
-
-print(response.json())
+resp = requests.post(
+    "https://api.intelligence.io.solutions/api/v1/chat/completions",
+    headers={"Authorization": f"Bearer {LLM_TOKEN}", "Content-Type": "application/json"},
+    json=data
+)
+print(resp.json())
