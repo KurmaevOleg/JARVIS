@@ -1,0 +1,13 @@
+mss
+numpy
+openai
+Pillow
+psutil
+pyautogui
+pyperclip
+requests
+schedule
+sounddevice
+torch
+urllib3
+vosk

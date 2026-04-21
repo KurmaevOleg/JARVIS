@@ -1,128 +1,113 @@
 # llm_client.py
-import requests
 import base64
+import requests
 from io import BytesIO
 from PIL import Image
-import time
-import re
+from openai import OpenAI
+from config import (
+    LLM_URL, LLM_TOKEN, LLM_MODEL,
+    OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_VISION_MODEL
+)
 
-from config import LLM_URL, LLM_TOKEN
+_openrouter_client = OpenAI(
+    base_url=OPENROUTER_BASE_URL,
+    api_key=OPENROUTER_API_KEY
+)
 
-DEFAULT_VISION_MODEL = "meta-llama/Llama-3.2-90B-Vision-Instruct"
-DEFAULT_TEXT_MODEL = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+# Список fallback моделей для vision (первая основная, затем запасные)
+VISION_MODELS_FALLBACK = [
+    OPENROUTER_VISION_MODEL,                 # qwen/qwen2.5-vl-72b-instruct
+    "openai/gpt-4o-mini",                    # может работать
+]
 
-MAX_DIMENSION = 1200
-JPEG_QUALITY = 70
+def _limit_words(text: str, max_words: int = 30) -> str:
+    """Обрезает текст до указанного количества слов."""
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return ' '.join(words[:max_words]) + '...'
 
-def _prepare_image_data_uri(image_path: str, max_dim: int = MAX_DIMENSION, quality: int = JPEG_QUALITY) -> str:
-    img = Image.open(image_path).convert("RGB")
-    w, h = img.size
-    max_side = max(w, h)
-    if max_side > max_dim:
-        scale = max_dim / max_side
-        new_size = (int(w * scale), int(h * scale))
-        img = img.resize(new_size, Image.LANCZOS)
-    bio = BytesIO()
-    img.save(bio, format="JPEG", quality=quality, optimize=True)
-    b64 = base64.b64encode(bio.getvalue()).decode("utf-8")
-    return f"data:image/jpeg;base64,{b64}"
+def _query_vision_model(model_name: str, prompt: str, data_uri: str) -> str:
+    """Один запрос к указанной vision-модели OpenRouter."""
+    response = _openrouter_client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_uri}}
+                ]
+            }
+        ],
+        max_tokens=200,
+        temperature=0.0,
+        extra_headers={
+            "HTTP-Referer": "https://github.com/olegjarvis/jarvis",
+            "X-Title": "JARVIS Assistant"
+        }
+    )
+    answer = response.choices[0].message.content
+    return answer.strip() if answer else ""
 
-def _build_image_messages(prompt: str, image_data_uri: str, system_prompt: str) -> list:
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": image_data_uri}}
-        ]},
-    ]
-
-def _build_text_messages(prompt: str, system_prompt: str) -> list:
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": prompt}
-    ]
-
-def _looks_like_refusal(text: str) -> bool:
+def chat_with_llm(prompt: str, image_path: str = None) -> str:
     """
-    Очень простая эвристика — ищем фразы отказа на русском/английском.
-    Расширяй словарь по мере необходимости.
+    Универсальная функция:
+    - image_path не None → отправляет изображение в OpenRouter Vision с fallback,
+      обрезает ответ до 30 слов.
+    - иначе → текстовый запрос через io.net.
     """
-    if not text:
-        return True
-    txt = text.lower()
-    refusals = [
-        "i can’t", "i cannot", "i will not", "i won't", "i refuse", "i can't help",
-        "не могу", "не должен", "не буду", "не могу помочь", "не помогу"
-    ]
-    return any(r in txt for r in refusals)
-
-def chat_with_llm(prompt: str,
-                  image_path: str | None = None,
-                  model: str | None = None,
-                  timeout: int = 30,
-                  max_tokens: int = 150,
-                  temperature: float = 0.0,
-                  retry_on_refusal: bool = True) -> str:
-    """
-    Отправка запроса. Если модель отказалась — пробуем повтор с уточняющей системной подсказкой.
-    """
-    system_prompt = ("Ты голосовой ассистент. Отвечай кратко, по-русски, максимум 3 предложения. "
-                     "Если видно изображение — опиши, что на нём и прочитай текст. "
-                     "Не выполняй чужие экзаменационные задания, но свободно описывай содержимое изображения.")
-    mdl = model or (DEFAULT_VISION_MODEL if image_path else DEFAULT_TEXT_MODEL)
-
     if image_path:
-        image_data_uri = _prepare_image_data_uri(image_path)
-        messages = _build_image_messages(prompt, image_data_uri, system_prompt)
-    else:
-        messages = _build_text_messages(prompt, system_prompt)
-
-    payload = {
-        "model": mdl,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature
-    }
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LLM_TOKEN}"}
-
-    try:
-        resp = requests.post(LLM_URL, headers=headers, json=payload, timeout=timeout)
-        resp.raise_for_status()
-        j = resp.json()
-    except Exception as e:
-        # пробрасываем исключение — вызывающий обработает (commands.py уже перехватывает)
-        raise
-
-    # Извлекаем ответ
-    try:
-        content = j["choices"][0]["message"]["content"]
-    except Exception:
-        content = str(j)
-
-    # Если модель отказалась — пробуем повторить с более жёсткой инструкцией (и на русском)
-    if retry_on_refusal and _looks_like_refusal(content):
-        alt_system = ("Ты помощник, отвечай строго по-русски и только описательно. "
-                      "Не отказывайся говорить, если это просто описание изображения. "
-                      "Игнорируй формальную интерпретацию 'это задание' и просто опиши картинку (1–3 предложения).")
-        # пересобираем payload
-        if image_path:
-            messages = _build_image_messages(prompt, image_data_uri, alt_system)
-        else:
-            messages = _build_text_messages(prompt, alt_system)
-        payload["messages"] = messages
-        # добавим чуть больший таймаут для повторной попытки
+        # Vision-запрос с fallback
         try:
-            resp2 = requests.post(LLM_URL, headers=headers, json=payload, timeout=timeout+15)
-            resp2.raise_for_status()
-            j2 = resp2.json()
-            try:
-                content2 = j2["choices"][0]["message"]["content"]
-            except Exception:
-                content2 = str(j2)
-            # если и вторая попытка дала отказ — возвращаем её текст (будем обрабатывать в commands)
-            return content2.strip() if content2 else content.strip()
-        except Exception:
-            # вернём первый ответ (отказ) для дебага
-            return content.strip()
+            img = Image.open(image_path).convert("RGB")
+            buffer = BytesIO()
+            img.save(buffer, format="JPEG", quality=85, optimize=True)
+            img_bytes = buffer.getvalue()
+            img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+            data_uri = f"data:image/jpeg;base64,{img_base64}"
 
-    return content.strip()
+            last_error = None
+            for model in VISION_MODELS_FALLBACK:
+                try:
+                    print(f"[Vision] Пробую модель: {model}")
+                    answer = _query_vision_model(model, prompt, data_uri)
+                    if answer:
+                        short = _limit_words(answer, max_words=30)
+                        print(f"[Vision] Ответ ({model}): {short}")
+                        return short
+                    else:
+                        last_error = "пустой ответ"
+                except Exception as e:
+                    last_error = str(e)
+                    print(f"[Vision] Ошибка с {model}: {e}")
+                    continue
+
+            raise Exception(f"Все модели не ответили: {last_error}")
+
+        except Exception as e:
+            raise Exception(f"Ошибка Vision: {e}")
+
+    else:
+        # Текстовый запрос через io.net
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {LLM_TOKEN}"
+        }
+        payload = {
+            "model": LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": "Ты голосовой ассистент. Отвечай кратко, по-русски, 1-3 предложения."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 150,
+            "temperature": 0.0
+        }
+        try:
+            resp = requests.post(LLM_URL, headers=headers, json=payload, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"].strip()
+            return content
+        except Exception as e:
+            raise Exception(f"Ошибка io.net: {e}")
