@@ -6,7 +6,8 @@ import time
 from datetime import datetime, timedelta
 import schedule
 
-TIMERS_FILE = "timers.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TIMERS_FILE = os.path.join(BASE_DIR, "timers.json")
 
 class TimerManager:
     def __init__(self, speak_callback):

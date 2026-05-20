@@ -5,19 +5,19 @@ from io import BytesIO
 from PIL import Image
 from openai import OpenAI
 from config import (
-    LLM_URL, LLM_TOKEN, LLM_MODEL,
-    OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_VISION_MODEL
+    LLM_URL, LLM_MODEL,
+    OPENROUTER_BASE_URL, OPENROUTER_VISION_MODEL
 )
-
-_openrouter_client = OpenAI(
-    base_url=OPENROUTER_BASE_URL,
-    api_key=OPENROUTER_API_KEY
+from secret_store import (
+    LLM_TOKEN as LLM_TOKEN_SECRET,
+    OPENROUTER_API_KEY as OPENROUTER_API_KEY_SECRET,
+    get_secret,
 )
 
 # Список fallback моделей для vision (первая основная, затем запасные)
 VISION_MODELS_FALLBACK = [
     OPENROUTER_VISION_MODEL,                 # qwen/qwen2.5-vl-72b-instruct
-    "openai/gpt-4o-mini",                    # может работать
+    "openai/gpt-4o-mini",
 ]
 
 def _limit_words(text: str, max_words: int = 30) -> str:
@@ -27,9 +27,21 @@ def _limit_words(text: str, max_words: int = 30) -> str:
         return text
     return ' '.join(words[:max_words]) + '...'
 
+def _require_secret(spec) -> str:
+    value = get_secret(spec)
+    if not value:
+        raise RuntimeError(f"Не задан {spec.label}. Откройте в приложении «Ключи доступа» и сохраните ключи.")
+    return value
+
+def _openrouter_client() -> OpenAI:
+    return OpenAI(
+        base_url=OPENROUTER_BASE_URL,
+        api_key=_require_secret(OPENROUTER_API_KEY_SECRET)
+    )
+
 def _query_vision_model(model_name: str, prompt: str, data_uri: str) -> str:
     """Один запрос к указанной vision-модели OpenRouter."""
-    response = _openrouter_client.chat.completions.create(
+    response = _openrouter_client().chat.completions.create(
         model=model_name,
         messages=[
             {
@@ -92,7 +104,7 @@ def chat_with_llm(prompt: str, image_path: str = None) -> str:
         # Текстовый запрос через io.net
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {LLM_TOKEN}"
+            "Authorization": f"Bearer {_require_secret(LLM_TOKEN_SECRET)}"
         }
         payload = {
             "model": LLM_MODEL,

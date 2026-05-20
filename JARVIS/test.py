@@ -9,7 +9,8 @@ import io
 import time
 from PIL import Image, ImageDraw, ImageFont
 from openai import OpenAI
-from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
+from config import OPENROUTER_BASE_URL
+from secret_store import OPENROUTER_API_KEY as OPENROUTER_API_KEY_SECRET, get_secret
 
 # ---------- СПИСОК БЕСПЛАТНЫХ МОДЕЛЕЙ ДЛЯ ТЕСТА ----------
 FREE_VISION_MODELS = [
@@ -77,7 +78,10 @@ def main():
     print("=== Тест БЕСПЛАТНЫХ Vision-моделей OpenRouter ===\n")
 
     # 1. Инициализация клиента
-    client = OpenAI(base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
+    api_key = get_secret(OPENROUTER_API_KEY_SECRET)
+    if not api_key:
+        raise RuntimeError("OpenRouter API key не задан. Сначала сохраните ключ в приложении.")
+    client = OpenAI(base_url=OPENROUTER_BASE_URL, api_key=api_key)
     print("✅ Клиент инициализирован\n")
 
     # 2. Подготовка изображения

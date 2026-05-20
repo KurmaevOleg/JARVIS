@@ -8,7 +8,10 @@ import torch
 from config import SR_TTS, DEVICE
 from number_utils import replace_numbers_for_speech
 
+# Ассистент либо говорит, либо слушает
 is_speaking = threading.Event()
+_speak_lock = threading.Lock()
+
 
 def initialize_tts(speaker: str = 'v4_ru'):
     model, _ = torch.hub.load(
@@ -19,11 +22,18 @@ def initialize_tts(speaker: str = 'v4_ru'):
     silence = np.zeros(int(0.2 * SR_TTS), dtype=np.float32)
     return model, silence
 
+
 def warmup_tts(model, silence):
-    _ = model.apply_tts(text="привет", speaker='aidar',
-                        sample_rate=SR_TTS, put_accent=True, put_yo=True)
+    _ = model.apply_tts(
+        text="привет",
+        speaker='aidar',
+        sample_rate=SR_TTS,
+        put_accent=True,
+        put_yo=True
+    )
     sd.play(silence, samplerate=SR_TTS)
     sd.wait()
+
 
 def _normalize_for_tts(text: str) -> str:
     text = text.replace("\n", " ")
@@ -33,21 +43,23 @@ def _normalize_for_tts(text: str) -> str:
     text = re.sub(r"[^\wа-яА-Яa-zA-Z0-9 .,!?—-]", "", text)
     return text[:800]
 
-def speak(model, silence, text: str):
-    print(f"Ассистент: {text}")  # на экран — как есть
-    safe = _normalize_for_tts(text)  # в речь — с преобразованием чисел
 
-    is_speaking.set()
-    try:
-        audio = model.apply_tts(
-            text=safe,
-            speaker='aidar',
-            sample_rate=SR_TTS,
-            put_accent=True,
-            put_yo=True
-        )
-        audio_np = np.concatenate([np.array(audio, dtype=np.float32), silence])
-        sd.play(audio_np, samplerate=SR_TTS)
-        sd.wait()
-    finally:
-        is_speaking.clear()
+def speak(model, silence, text: str):
+    print(f"Ассистент: {text}")
+    safe = _normalize_for_tts(text)
+
+    with _speak_lock:
+        is_speaking.set()
+        try:
+            audio = model.apply_tts(
+                text=safe,
+                speaker='aidar',
+                sample_rate=SR_TTS,
+                put_accent=True,
+                put_yo=True
+            )
+            audio_np = np.concatenate([np.array(audio, dtype=np.float32), silence])
+            sd.play(audio_np, samplerate=SR_TTS)
+            sd.wait()
+        finally:
+            is_speaking.clear()

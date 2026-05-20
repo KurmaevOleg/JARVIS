@@ -22,9 +22,8 @@ from timer_manager import TimerManager
 import system_monitor
 
 # === КОНФИГУРАЦИЯ ===
-FILE_REGISTRY_PATH = "file_registry.json"
-SCREENSHOT_DIR = "screenshots"
-os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FILE_REGISTRY_PATH = os.path.join(BASE_DIR, "file_registry.json")
 
 # Оптимизация pyautogui
 pyautogui.PAUSE = 0.05
@@ -59,57 +58,25 @@ def save_registry(registry: dict) -> None:
     with open(FILE_REGISTRY_PATH, "w", encoding="utf-8") as f:
         json.dump(registry, f, ensure_ascii=False, indent=2)
 
+def register_file(file_path: str, keywords: list[str]) -> list[str]:
+    registry = load_registry()
+    absolute_path = os.path.abspath(file_path)
+    added = []
+
+    for keyword in keywords:
+        cleaned_keyword = keyword.strip().lower()
+        if cleaned_keyword:
+            registry[cleaned_keyword] = absolute_path
+            added.append(cleaned_keyword)
+
+    if added:
+        save_registry(registry)
+
+    return added
+
 # === РАБОТА С ФАЙЛАМИ ===
 def handle_add_file(tts_model, silence) -> bool:
-    speak(tts_model, silence, "Введите путь к файлу.")
-    print("\n💡 Введите полный путь к файлу (или 'отмена' для выхода):")
-
-    while True:
-        try:
-            raw_path = input("> ").strip().strip("\"'")
-        except EOFError:
-            speak(tts_model, silence, "Ввод прерван.")
-            return True
-
-        if raw_path.lower() in ("отмена", "cancel", "выход"):
-            speak(tts_model, silence, "Добавление файла отменено.")
-            return True
-
-        if os.path.isfile(raw_path):
-            file_path = os.path.abspath(raw_path)
-            break
-
-        print("❌ Файл не найден. Проверьте путь или введите 'отмена'.")
-        speak(tts_model, silence, "Файл не найден. Повторите ввод или скажите отмена.")
-
-    speak(tts_model, silence, "Файл найден. Введите ключевые слова через запятую.")
-    print("💡 Введите ключевые слова через запятую (например: дискорд, дс, дис):")
-
-    try:
-        keywords_input = input("> ").strip()
-    except EOFError:
-        speak(tts_model, silence, "Ввод прерван.")
-        return True
-
-    if not keywords_input:
-        speak(tts_model, silence, "Ключевые слова не введены. Отмена.")
-        return True
-
-    keywords = [kw.strip().lower() for kw in keywords_input.split(",") if kw.strip()]
-    if not keywords:
-        speak(tts_model, silence, "Некорректные ключевые слова. Отмена.")
-        return True
-
-    registry = load_registry()
-    added = []
-    for kw in keywords:
-        if kw in registry:
-            print(f"⚠️ Ключ '{kw}' уже привязан. Перезаписываю.")
-        registry[kw] = file_path
-        added.append(kw)
-
-    save_registry(registry)
-    speak(tts_model, silence, f"Файл добавлен. Ключи: {', '.join(added)}")
+    speak(tts_model, silence, "Откройте окно приложения и добавьте файл через кнопку Добавить файл.")
     return True
 
 def handle_open_file(cmd: str, tts_model, silence) -> bool:
@@ -302,6 +269,11 @@ def process_command(text: str, tts_model, silence, timer_manager: TimerManager) 
         speak(tts_model, silence, "Ассистент завершает работу.")
         return False
 
+    # Режим ожидания (не выключает ассистента, просто прекращает текущий диалог)
+    if any(k in cmd for k in ("отойди", "спи", "замолчи", "хватит")):
+        speak(tts_model, silence, "Хорошо, я замолкаю. Скажите 'Джарвис', когда будет нужно.")
+        return True  # возвращаемся в режим ожидания wake word
+
     # 1. Файлы
     if "добавить файл" in cmd:
         return handle_add_file(tts_model, silence)
@@ -317,7 +289,7 @@ def process_command(text: str, tts_model, silence, timer_manager: TimerManager) 
         _, msg = reboot_pc(confirm=("без подтверждения" not in cmd and "подтверждаю" not in cmd and "без подтверждение" not in cmd))
         speak(tts_model, silence, msg)
         return True
-    if any(k in cmd for k in ["спящий режим", "усни", "сон", "засни"]):
+    if any(k in cmd for k in ["спящий режим", "сон"]):
         _, msg = sleep_pc()
         speak(tts_model, silence, msg)
         return True
@@ -423,7 +395,13 @@ def process_command(text: str, tts_model, silence, timer_manager: TimerManager) 
         speak(tts_model, silence, f"Напоминание через {value} {unit} установлено")
         return True
 
-    if "активные таймеры" in cmd or "сколько таймеров" in cmd:
+    if any(k in cmd for k in (
+        "активные таймеры",
+        "активные таймера",
+        "активный таймер",
+        "сколько таймеров",
+        "сколько таймера",
+    )):
         count = timer_manager.get_active_count()
         speak(tts_model, silence, f"Активных таймеров и напоминаний: {count}")
         return True
