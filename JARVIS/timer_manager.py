@@ -15,6 +15,7 @@ class TimerManager:
         self.timers = []
         self._running = False
         self._thread = None
+        self._scheduler = schedule.Scheduler()
         self._load_timers()
 
     def _load_timers(self):
@@ -67,9 +68,10 @@ class TimerManager:
             self._save_timers()
 
     def _run(self):
-        schedule.every(1).seconds.do(self._check_timers)
+        self._scheduler.clear()
+        self._scheduler.every(1).seconds.do(self._check_timers)
         while self._running:
-            schedule.run_pending()
+            self._scheduler.run_pending()
             time.sleep(0.5)
 
     def start(self):
@@ -82,3 +84,5 @@ class TimerManager:
         self._running = False
         if self._thread:
             self._thread.join(timeout=2)
+            self._thread = None
+        self._scheduler.clear()

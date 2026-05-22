@@ -4,13 +4,14 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 import commands as commands_module
 from commands import process_command, register_file
-from stt import initialize_stt, listen_once
+from keyboard_layout import switch_to_english_layout
+from stt import SpeechListener, initialize_stt
 from tts import initialize_tts, warmup_tts, speak as tts_speak
 from timer_manager import TimerManager
 
 
 WAKE_WORDS = ("джарвис", "джервис", "jarvis")
-SLEEP_COMMANDS = ("отойди", "спи", "замолчи", "хватит")
+SLEEP_COMMANDS = ("отойди", "спи", "усни", "хватит")
 
 
 def strip_wake_word(text: str) -> tuple[bool, str]:
@@ -27,6 +28,7 @@ class AssistantWorker(QThread):
     ready = pyqtSignal()
     finished_clean = pyqtSignal()
     add_file_requested = pyqtSignal()
+    awake_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,21 +37,36 @@ class AssistantWorker(QThread):
         self._tts_model = None
         self._silence = None
         self._timer_manager = None
-        self._awake = False
+        self._awake = threading.Event()
         self._add_file_event = threading.Event()
         self._add_file_result = None
 
     def request_stop(self):
         self._stop_event.set()
 
+    def wake_assistant(self):
+        self._awake.set()
+        self.awake_changed.emit(True)
+        self.log.emit("Ассистент переведен в режим команды.")
+        if self._tts_model is not None and self._silence is not None:
+            self._speak_proxy(self._tts_model, self._silence, "Слушаю.")
+        self.status.emit("Слушаю команду")
+
+    def sleep_assistant(self):
+        self._awake.clear()
+        self.awake_changed.emit(False)
+        self.log.emit("Ассистент переведен в ожидание.")
+        if self._tts_model is not None and self._silence is not None:
+            self._speak_proxy(self._tts_model, self._silence, "Хорошо, я замолкаю. Скажите Джарвис, когда будет нужно.")
+        self.status.emit("Ожидаю Джарвис")
+
     def _speak_proxy(self, model, silence, text: str):
         self.log.emit(f"Ассистент: {text}")
         self.status.emit("Говорю")
-        tts_speak(model, silence, text)
+        tts_speak(self._tts_model, self._silence, text)
 
     def _timer_speak_proxy(self, text: str):
-        if self._tts_model is not None and self._silence is not None:
-            self._speak_proxy(self._tts_model, self._silence, text)
+        self._speak_proxy(self._tts_model, self._silence, text)
 
     def provide_add_file_result(self, result: dict | None):
         self._add_file_result = result
@@ -84,6 +101,7 @@ class AssistantWorker(QThread):
 
     def run(self):
         try:
+            switch_to_english_layout()
             self.status.emit("Загрузка моделей")
             self.log.emit("Инициализация STT и TTS...")
 
@@ -101,54 +119,58 @@ class AssistantWorker(QThread):
 
             self._speak_proxy(self._tts_model, self._silence, "Ассистент готов. Скажите Джарвис, чтобы обратиться ко мне.")
             self.status.emit("Ожидаю Джарвис")
+            self.awake_changed.emit(False)
 
-            while not self._stop_event.is_set():
-                text = listen_once(self._stt_model, stop_event=self._stop_event)
+            with SpeechListener(self._stt_model, stop_event=self._stop_event) as listener:
+                while not self._stop_event.is_set():
+                    text = listener.listen_once()
 
-                if self._stop_event.is_set():
-                    break
+                    if self._stop_event.is_set():
+                        break
 
-                if not text:
-                    continue
-
-                has_wake_word, command_text = strip_wake_word(text)
-
-                if not has_wake_word and not self._awake:
-                    self.status.emit("Ожидаю Джарвис")
-                    continue
-
-                self.log.emit(f"Вы: {text if has_wake_word else command_text}")
-
-                if has_wake_word:
-                    self._awake = True
-                    if not command_text:
-                        self._speak_proxy(self._tts_model, self._silence, "Слушаю.")
-                        self.status.emit("Слушаю команду")
+                    if not text:
                         continue
 
-                if any(k in command_text for k in SLEEP_COMMANDS):
-                    self._awake = False
+                    has_wake_word, command_text = strip_wake_word(text)
 
-                self.status.emit("Обрабатываю")
+                    if not has_wake_word and not self._awake.is_set():
+                        self.status.emit("Ожидаю Джарвис")
+                        continue
 
-                if "добавить файл" in command_text:
-                    keep_running = self._handle_add_file()
+                    self.log.emit(f"Вы: {text if has_wake_word else command_text}")
+
+                    if has_wake_word:
+                        self._awake.set()
+                        self.awake_changed.emit(True)
+                        if not command_text:
+                            self._speak_proxy(self._tts_model, self._silence, "Слушаю.")
+                            self.status.emit("Слушаю команду")
+                            continue
+
+                    if any(k in command_text for k in SLEEP_COMMANDS):
+                        self._awake.clear()
+                        self.awake_changed.emit(False)
+
+                    self.status.emit("Обрабатываю")
+
+                    if "добавить файл" in command_text:
+                        self._handle_add_file()
+                        if not self._stop_event.is_set():
+                            self.status.emit("Слушаю команду" if self._awake.is_set() else "Ожидаю Джарвис")
+                        continue
+
+                    keep_running = process_command(
+                        command_text,
+                        self._tts_model,
+                        self._silence,
+                        self._timer_manager
+                    )
+
+                    if keep_running is False:
+                        break
+
                     if not self._stop_event.is_set():
-                        self.status.emit("Слушаю команду" if self._awake else "Ожидаю Джарвис")
-                    continue
-
-                keep_running = process_command(
-                    command_text,
-                    self._tts_model,
-                    self._silence,
-                    self._timer_manager
-                )
-
-                if keep_running is False:
-                    break
-
-                if not self._stop_event.is_set():
-                    self.status.emit("Слушаю команду" if self._awake else "Ожидаю Джарвис")
+                        self.status.emit("Слушаю команду" if self._awake.is_set() else "Ожидаю Джарвис")
 
         except Exception as e:
             self.log.emit(f"Ошибка: {e}")

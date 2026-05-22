@@ -17,13 +17,16 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from assistant_worker import AssistantWorker
-from commands import register_file
+from commands import create_and_open_file, get_registered_files, register_file
+from keyboard_layout import switch_to_english_layout
 from secret_store import (
     REQUIRED_SECRETS,
     SecretStoreError,
@@ -35,8 +38,11 @@ from secret_store import (
 
 COMMAND_HELP = [
     ("Wake word", "джарвис / джервис / jarvis", "Активирует ассистента"),
-    ("Ожидание", "отойди / спи / замолчи / хватит", "Возвращает ассистента в ожидание wake word"),
+    ("Ожидание", "отойди / спи / усни / хватит", "Возвращает ассистента в ожидание wake word"),
     ("Файлы", "добавить файл", "Открывает GUI для выбора файла и ключевых слов"),
+    ("Файлы", "создай ворд документ", "Создает и открывает .docx"),
+    ("Файлы", "создай эксель таблицу", "Создает и открывает .xlsx"),
+    ("Файлы", "создай текстовый документ", "Создает и открывает .txt"),
     ("Файлы", "открой файл <ключ>", "Открывает привязанный файл"),
     ("ПК", "выключи компьютер без подтверждения", "Выключает компьютер"),
     ("ПК", "перезагрузи компьютер без подтверждения", "Перезагружает компьютер"),
@@ -54,6 +60,37 @@ COMMAND_HELP = [
     ("Напоминание", "напомни через 5 минут <текст>", "Ставит напоминание"),
     ("Таймеры", "активные таймеры / активные таймера", "Говорит количество активных таймеров"),
 ]
+
+
+class RegisteredFilesDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Добавленные файлы")
+        self.setMinimumSize(780, 460)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        table = QTableWidget()
+        registry = get_registered_files()
+        grouped = {}
+        for keyword, path in registry.items():
+            grouped.setdefault(path, []).append(keyword)
+
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["Файл", "Ключевые слова"])
+        table.setRowCount(len(grouped))
+        table.horizontalHeader().setStretchLastSection(True)
+
+        for row, (path, keywords) in enumerate(sorted(grouped.items())):
+            table.setItem(row, 0, QTableWidgetItem(path))
+            table.setItem(row, 1, QTableWidgetItem(", ".join(sorted(keywords))))
+
+        layout.addWidget(table, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class CommandsHelpDialog(QDialog):
@@ -171,6 +208,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.worker = None
+        self._current_status_text = None
 
         self.setWindowTitle("JARVIS Assistant")
         self.setMinimumSize(980, 680)
@@ -220,11 +258,12 @@ class MainWindow(QMainWindow):
         self.log_box.setReadOnly(True)
         self.log_box.setFont(QFont("Consolas", 11))
         self.log_box.setPlaceholderText("Здесь будут появляться распознанные команды и ответы ассистента...")
+        self.log_box.document().setMaximumBlockCount(350)
 
         log_layout.addWidget(log_label)
         log_layout.addWidget(self.log_box)
 
-        # ===== Controls Card =====
+        # ===== Assistant Controls Card =====
         controls = QFrame()
         controls.setObjectName("Card")
         controls_layout = QHBoxLayout(controls)
@@ -244,9 +283,6 @@ class MainWindow(QMainWindow):
         self.credentials_btn = QPushButton("Ключи доступа")
         self.credentials_btn.clicked.connect(self.open_credentials_dialog)
 
-        self.add_file_btn = QPushButton("Добавить файл")
-        self.add_file_btn.clicked.connect(self.open_add_file_dialog)
-
         self.help_btn = QPushButton("Подсказка")
         self.help_btn.clicked.connect(self.open_commands_help)
 
@@ -254,9 +290,33 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.stop_btn)
         controls_layout.addWidget(self.clear_btn)
         controls_layout.addWidget(self.credentials_btn)
-        controls_layout.addWidget(self.add_file_btn)
         controls_layout.addWidget(self.help_btn)
         controls_layout.addStretch(1)
+
+        # ===== Files Card =====
+        files_card = QFrame()
+        files_card.setObjectName("Card")
+        files_layout = QHBoxLayout(files_card)
+        files_layout.setContentsMargins(18, 18, 18, 18)
+        files_layout.setSpacing(12)
+
+        files_label = QLabel("Файлы")
+        files_label.setObjectName("SectionTitle")
+
+        self.add_file_btn = QPushButton("Добавить файл")
+        self.add_file_btn.clicked.connect(self.open_add_file_dialog)
+
+        self.files_btn = QPushButton("Добавленные файлы")
+        self.files_btn.clicked.connect(self.open_registered_files)
+
+        self.create_file_btn = QPushButton("Создать файл")
+        self.create_file_btn.clicked.connect(self.open_create_file_dialog)
+
+        files_layout.addWidget(files_label)
+        files_layout.addWidget(self.add_file_btn)
+        files_layout.addWidget(self.files_btn)
+        files_layout.addWidget(self.create_file_btn)
+        files_layout.addStretch(1)
 
         footer = QLabel("PyQt6 UI • фоновой поток")
         footer.setObjectName("Footer")
@@ -264,10 +324,12 @@ class MainWindow(QMainWindow):
         outer.addWidget(header)
         outer.addWidget(log_card, 1)
         outer.addWidget(controls)
+        outer.addWidget(files_card)
         outer.addWidget(footer)
 
         self._apply_theme()
         self._update_credentials_status()
+        switch_to_english_layout()
         QTimer.singleShot(300, self.start_assistant)
 
     def _apply_theme(self):
@@ -354,6 +416,10 @@ class MainWindow(QMainWindow):
         self.log_box.moveCursor(QTextCursor.MoveOperation.End)
 
     def set_status(self, text: str):
+        if text == self._current_status_text:
+            return
+
+        self._current_status_text = text
         self.status_pill.setText(text)
 
         status = text.lower()
@@ -400,6 +466,36 @@ class MainWindow(QMainWindow):
     def open_commands_help(self):
         CommandsHelpDialog(self).exec()
 
+    def open_registered_files(self):
+        RegisteredFilesDialog(self).exec()
+
+    def open_create_file_dialog(self):
+        file_type, ok = QInputDialog.getItem(
+            self,
+            "Создать файл",
+            "Тип файла:",
+            ["Текстовый документ", "Word документ", "Excel таблица"],
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        name, ok = QInputDialog.getText(self, "Название файла", "Название файла:")
+        if not ok:
+            return
+
+        kind_map = {
+            "Текстовый документ": "text",
+            "Word документ": "word",
+            "Excel таблица": "excel",
+        }
+        try:
+            path = create_and_open_file(kind_map[file_type], name.strip() or None)
+            self.append_log(f"Создан файл: {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Создание файла", f"Не удалось создать файл: {exc}")
+
     def open_add_file_dialog(self, from_voice_command: bool = False):
         file_path, _ = QFileDialog.getOpenFileName(self, "Выберите файл для голосового открытия")
         if not file_path:
@@ -439,6 +535,7 @@ class MainWindow(QMainWindow):
 
     def start_assistant(self):
         if self.worker and self.worker.isRunning():
+            self.worker.wake_assistant()
             return
 
         try:
@@ -460,9 +557,10 @@ class MainWindow(QMainWindow):
         self.worker.finished_clean.connect(self.on_worker_finished)
         self.worker.ready.connect(self.on_worker_ready)
         self.worker.add_file_requested.connect(self.open_add_file_dialog_from_voice)
+        self.worker.awake_changed.connect(self.on_awake_changed)
 
         self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
         self.set_status("Загрузка моделей")
         self.append_log("Запуск ассистента...")
 
@@ -470,12 +568,16 @@ class MainWindow(QMainWindow):
 
     def stop_assistant(self):
         if self.worker and self.worker.isRunning():
-            self.append_log("Остановка ассистента...")
-            self.worker.request_stop()
-            self.stop_btn.setEnabled(False)
+            self.worker.sleep_assistant()
+
+    def on_awake_changed(self, awake: bool):
+        self.start_btn.setEnabled(not awake)
+        self.stop_btn.setEnabled(awake)
 
     def on_worker_ready(self):
         self.append_log("Ассистент запущен.")
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
 
     def on_worker_finished(self):
         self.start_btn.setEnabled(True)

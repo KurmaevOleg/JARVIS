@@ -14,6 +14,10 @@ def get_memory_usage():
     percent = mem.percent
     return used, total, percent
 
+def get_memory_report() -> str:
+    used, total, percent = get_memory_usage()
+    return f"Оперативной памяти занято {used:.1f} ГБ из {total:.1f} ГБ, {percent:.1f} процента занято"
+
 def get_disk_usage():
     disk = psutil.disk_usage('C:/')
     free = disk.free / (1024**3)
@@ -36,6 +40,6 @@ def get_system_report():
 
     return (
         f"CPU {cpu:.1f}%. "
-        f"ОЗУ: занято {mem_used:.1f} ГБ из {mem_total:.1f} ГБ ({mem_percent:.1f}%). "
+        f"ОЗУ: занято {mem_used:.1f} ГБ из {mem_total:.1f} ГБ, {mem_percent:.1f} процента занято. "
         f"Диск: свободно {disk_free:.1f} ГБ из {disk_total:.1f} ГБ ({disk_percent:.1f}% занято)."
     )
