@@ -20,7 +20,7 @@ VISION_MODELS_FALLBACK = [
     "openai/gpt-4o-mini",
 ]
 
-def _limit_words(text: str, max_words: int = 30) -> str:
+def _limit_words(text: str, max_words: int = 50) -> str:
     """Обрезает текст до указанного количества слов."""
     words = text.split()
     if len(words) <= max_words:
@@ -52,7 +52,7 @@ def _query_vision_model(model_name: str, prompt: str, data_uri: str) -> str:
                 ]
             }
         ],
-        max_tokens=200,
+        max_tokens=350,
         temperature=0.0,
         extra_headers={
             "HTTP-Referer": "https://github.com/olegjarvis/jarvis",
@@ -66,7 +66,7 @@ def chat_with_llm(prompt: str, image_path: str = None) -> str:
     """
     Универсальная функция:
     - image_path не None → отправляет изображение в OpenRouter Vision с fallback,
-      обрезает ответ до 30 слов.
+      обрезает ответ до 50 слов.
     - иначе → текстовый запрос через io.net.
     """
     if image_path:
@@ -85,7 +85,7 @@ def chat_with_llm(prompt: str, image_path: str = None) -> str:
                     print(f"[Vision] Пробую модель: {model}")
                     answer = _query_vision_model(model, prompt, data_uri)
                     if answer:
-                        short = _limit_words(answer, max_words=30)
+                        short = _limit_words(answer, max_words=50)
                         print(f"[Vision] Ответ ({model}): {short}")
                         return short
                     else:

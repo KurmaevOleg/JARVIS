@@ -244,13 +244,25 @@ def check_command_routing() -> None:
             handled = commands.handle_create_file(phrase, None, None)
             if not handled or len(calls) == before or calls[-1][0] != "excel":
                 raise AssertionError(f"Команда не распознана как Excel/xlsx: {phrase}")
+
+        screen_cases = {
+            "что на экране": "",
+            "прочитай экран": "",
+            "сделай скриншот и опиши что за ошибка": "опиши что за ошибка",
+            "сделай снимок экрана и расскажи как найти кнопку сохранить": "расскажи как найти кнопку сохранить",
+            "найди кнопку настройки на экране": "найди кнопку настройки",
+        }
+        for phrase, expected in screen_cases.items():
+            actual = commands.extract_screen_query(phrase)
+            if actual != expected:
+                raise AssertionError(f"Неверный screen-запрос: {phrase!r} -> {actual!r}, ожидалось {expected!r}")
     finally:
         commands.create_and_open_file = original_create
         commands.speak = original_speak
 
     print()
     print("Проверка команд: ok")
-    print("Ослышки Word и Excel уходят в создание .docx/.xlsx, а не в LLM.")
+    print("Ослышки Word/Excel и screen-запросы маршрутизируются правильно.")
 
 
 def run_memory_profile(args: argparse.Namespace) -> None:

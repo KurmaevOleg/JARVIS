@@ -406,6 +406,95 @@ def handle_clipboard(cmd: str, tts_model, silence) -> bool:
     return False
 
 # === СКРИНШОТ И АНАЛИЗ ЭКРАНА ===
+SCREEN_COMMAND_ALIASES = (
+    "что у меня на экране",
+    "что сейчас на экране",
+    "что на экране",
+    "прочитай с экрана",
+    "прочитай экран",
+    "прочти с экрана",
+    "прочти экран",
+    "опиши что на экране",
+    "опиши экран",
+    "расскажи что на экране",
+    "посмотри на экран",
+    "посмотри экран",
+    "проанализируй экран",
+    "сделай снимок экрана",
+    "сними снимок экрана",
+    "снимок экрана",
+    "сделай скриншот",
+    "сделай скрин",
+    "сними скриншот",
+    "сними скрин",
+    "скриншот",
+    "скрин",
+    "на экране",
+    "экран",
+)
+
+SCREEN_DEFAULT_QUERIES = {
+    "",
+    "что",
+    "что это",
+    "что там",
+    "посмотри",
+    "покажи",
+    "опиши",
+    "прочитай",
+    "прочти",
+    "расскажи",
+    "анализируй",
+    "проанализируй",
+}
+
+
+def _clean_screen_query(text: str) -> str:
+    text = re.sub(r"^[\s,.:;!?—-]+", "", text.strip())
+    text = re.sub(r"[\s,.:;!?—-]+$", "", text)
+    while True:
+        cleaned = re.sub(r"^(?:и|а|ну|пожалуйста|плиз|мне|тут|здесь)\s+", "", text).strip()
+        if cleaned == text:
+            return cleaned
+        text = cleaned
+
+
+def extract_screen_query(cmd: str) -> str | None:
+    cmd = re.sub(r"\s+", " ", cmd.lower()).strip()
+    if not cmd:
+        return None
+
+    for alias in sorted(SCREEN_COMMAND_ALIASES, key=len, reverse=True):
+        index = cmd.find(alias)
+        if index < 0:
+            continue
+
+        before = _clean_screen_query(cmd[:index])
+        after = _clean_screen_query(cmd[index + len(alias):])
+        query = after or before
+        if query in SCREEN_DEFAULT_QUERIES:
+            return ""
+        return query
+
+    return None
+
+
+def build_screen_prompt(query: str) -> str:
+    if query:
+        return (
+            "Ты анализируешь скриншот экрана пользователя. "
+            f"Выполни запрос: {query}. "
+            "Отвечай по-русски, конкретно и полезно, до 50 слов. "
+            "Если видишь ошибку, назови вероятную причину и следующий шаг. "
+            "Если пользователь ищет кнопку или элемент, объясни где он находится на экране."
+        )
+
+    return (
+        "Опиши, что происходит на экране, до 50 слов. "
+        "Если видишь ошибку, важный текст или активное окно, назови главное."
+    )
+
+
 def take_screenshot(max_side: int = 1024) -> str:
     """Делает скриншот, уменьшает до max_side и сохраняет во временный JPEG."""
     import mss
@@ -420,15 +509,18 @@ def take_screenshot(max_side: int = 1024) -> str:
         img.save(tmp.name, format="JPEG", quality=85, optimize=True)
         return tmp.name
 
-def handle_screen_image(tts_model, silence) -> bool:
+def handle_screen_image(tts_model, silence, query: str = "") -> bool:
     try:
-        speak(tts_model, silence, "Делаю скриншот и анализирую.")
+        if query:
+            speak(tts_model, silence, "Делаю скриншот и анализирую запрос.")
+        else:
+            speak(tts_model, silence, "Делаю скриншот и анализирую экран.")
         path = take_screenshot()
     except Exception as e:
         speak(tts_model, silence, f"Не удалось сделать скриншот: {e}")
         return True
 
-    prompt = "Опиши, что происходит на экране, не более чем в 30 словах. Если есть текст, прочитай его кратко."
+    prompt = build_screen_prompt(query)
     try:
         from llm_client import chat_with_llm
 
@@ -498,8 +590,9 @@ def process_command(text: str, tts_model, silence, timer_manager: TimerManager) 
         return True
 
     # 5. Скриншот
-    if any(k in cmd for k in ("скриншот", "экран", "что на экране", "прочитай экран")):
-        return handle_screen_image(tts_model, silence)
+    screen_query = extract_screen_query(cmd)
+    if screen_query is not None:
+        return handle_screen_image(tts_model, silence, screen_query)
 
     # 6. Время
     if "время" in cmd:
