@@ -1,114 +1,334 @@
 #!/usr/bin/env python3
 """
-Тест БЕСПЛАТНЫХ vision-моделей OpenRouter.
-Проверяет, какие модели с суффиксом :free действительно работают и сколько времени занимает ответ.
+Диагностика памяти JARVIS.
+
+Запуск:
+    python JARVIS/test.py
+    python JARVIS/test.py --idle-seconds 120
+    python JARVIS/test.py --skip-tts
+    python JARVIS/test.py --skip-main
+    python JARVIS/test.py --check-commands
 """
 
-import base64
-import io
+from __future__ import annotations
+
+import argparse
+import ctypes
+import gc
+import importlib
+import os
+import sys
+import threading
 import time
-from PIL import Image, ImageDraw, ImageFont
-from openai import OpenAI
-from config import OPENROUTER_BASE_URL
-from secret_store import OPENROUTER_API_KEY as OPENROUTER_API_KEY_SECRET, get_secret
+import traceback
+from dataclasses import dataclass
+from typing import Any, Callable
 
-# ---------- СПИСОК БЕСПЛАТНЫХ МОДЕЛЕЙ ДЛЯ ТЕСТА ----------
-FREE_VISION_MODELS = [
-    "qwen/qwen2.5-vl-32b-instruct:free",
-    "google/gemma-3-4b-it:free",
-    "meta-llama/llama-3.2-11b-vision-instruct:free",
-    "openrouter/free",  # Роутер бесплатных моделей
-]
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 
-# ---------- УТИЛИТЫ ----------
-def create_test_image(width=400, height=300) -> bytes:
-    """Создаёт простое тестовое изображение."""
-    img = Image.new('RGB', (width, height), color='white')
-    draw = ImageDraw.Draw(img)
-    draw.ellipse((100, 50, 300, 250), fill='red', outline='black', width=3)
+MB = 1024 * 1024
+PROCESS = psutil.Process(os.getpid()) if psutil is not None else None
+KEEPALIVE: dict[str, Any] = {}
+
+
+class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.c_ulong),
+        ("PageFaultCount", ctypes.c_ulong),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+        ("PrivateUsage", ctypes.c_size_t),
+    ]
+
+
+@dataclass
+class StepResult:
+    name: str
+    before_mb: float
+    after_mb: float
+    delta_mb: float
+    seconds: float
+    status: str
+
+
+def windows_memory_info() -> tuple[int, int]:
+    if os.name != "nt":
+        raise RuntimeError("psutil не установлен, а fallback памяти доступен только на Windows.")
+
+    counters = PROCESS_MEMORY_COUNTERS_EX()
+    counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS_EX)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    psapi.GetProcessMemoryInfo.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(PROCESS_MEMORY_COUNTERS_EX),
+        ctypes.c_ulong,
+    ]
+    psapi.GetProcessMemoryInfo.restype = ctypes.c_bool
+    handle = kernel32.GetCurrentProcess()
+    ok = psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
+    if not ok:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(counters.WorkingSetSize), int(counters.PrivateUsage)
+
+
+def memory_mb() -> float:
+    gc.collect()
+    if PROCESS is not None:
+        return PROCESS.memory_info().rss / MB
+    working_set, _ = windows_memory_info()
+    return working_set / MB
+
+
+def private_mb() -> float | None:
+    if PROCESS is None:
+        return None
+
     try:
-        font = ImageFont.load_default()
-    except:
-        font = None
-    draw.text((120, 270), "Free Model Test", fill='black', font=font)
+        info = PROCESS.memory_full_info()
+    except (psutil.Error, AttributeError):
+        return None
 
-    img_byte_arr = io.BytesIO()
-    img.save(img_byte_arr, format='JPEG')
-    return img_byte_arr.getvalue()
-
-
-def encode_image_to_base64(image_bytes: bytes) -> str:
-    """Кодирует изображение в формат data URI."""
-    return f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
+    value = getattr(info, "uss", None)
+    if value is None:
+        return None
+    return value / MB
 
 
-def test_free_model(client: OpenAI, model_name: str, prompt: str, image_data_uri: str) -> tuple[bool, float, str]:
-    """Отправляет запрос к модели и возвращает (успех, время_ответа, ответ/ошибка)."""
-    start_time = time.time()
+def print_step_header() -> None:
+    print()
+    print(f"{'Этап':<42} {'До, МБ':>10} {'После, МБ':>12} {'Рост, МБ':>10} {'Время, с':>10}  Статус")
+    print("-" * 104)
+
+
+def print_step(result: StepResult) -> None:
+    print(
+        f"{result.name:<42} "
+        f"{result.before_mb:>10.1f} "
+        f"{result.after_mb:>12.1f} "
+        f"{result.delta_mb:>10.1f} "
+        f"{result.seconds:>10.2f}  "
+        f"{result.status}"
+    )
+
+
+def measure(name: str, action: Callable[[], Any], keep_as: str | None = None) -> Any:
+    before = memory_mb()
+    started = time.perf_counter()
+    status = "ok"
+    result = None
+
     try:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": image_data_uri}}
-                    ]
-                }
-            ],
-            max_tokens=200,
-            temperature=0.0,
-            extra_headers={
-                "HTTP-Referer": "https://github.com/yourusername/jarvis-assistant",
-                "X-Title": "JARVIS Assistant"
-            }
+        result = action()
+        if keep_as is not None:
+            KEEPALIVE[keep_as] = result
+    except Exception as exc:
+        status = f"error: {exc}"
+        if os.getenv("JARVIS_TEST_TRACEBACK"):
+            traceback.print_exc()
+
+    if keep_as is None:
+        result = None
+
+    elapsed = time.perf_counter() - started
+    after = memory_mb()
+    print_step(StepResult(name, before, after, after - before, elapsed, status))
+    return result
+
+
+def import_module(name: str) -> Any:
+    module = importlib.import_module(name)
+    KEEPALIVE[f"module:{name}"] = module
+    return module
+
+
+def profile_idle_listener(listener: Any, stop_event: threading.Event, seconds: int, sample_interval: int) -> None:
+    if seconds <= 0:
+        return
+
+    print()
+    print(f"Проверка простоя микрофона: {seconds} сек. Интервал: {sample_interval} сек.")
+    print(f"{'Секунда':>8} {'RSS, МБ':>10} {'Рост, МБ':>10} {'Private, МБ':>12}")
+    print("-" * 46)
+
+    errors: list[str] = []
+
+    def listen_loop() -> None:
+        try:
+            with listener:
+                while not stop_event.is_set():
+                    listener.listen_once()
+        except Exception as exc:
+            errors.append(str(exc))
+
+    baseline = memory_mb()
+    thread = threading.Thread(target=listen_loop, name="jarvis-memory-listener", daemon=True)
+    thread.start()
+
+    started = time.monotonic()
+    next_sample = started
+    try:
+        while True:
+            now = time.monotonic()
+            elapsed = int(now - started)
+            if elapsed >= seconds:
+                break
+            if now >= next_sample:
+                current = memory_mb()
+                private = private_mb()
+                private_text = f"{private:>12.1f}" if private is not None else f"{'n/a':>12}"
+                print(f"{elapsed:>8} {current:>10.1f} {current - baseline:>10.1f} {private_text}")
+                next_sample = now + sample_interval
+            time.sleep(0.2)
+    finally:
+        stop_event.set()
+        thread.join(timeout=5)
+
+    current = memory_mb()
+    private = private_mb()
+    private_text = f"{private:>12.1f}" if private is not None else f"{'n/a':>12}"
+    print(f"{seconds:>8} {current:>10.1f} {current - baseline:>10.1f} {private_text}")
+
+    if errors:
+        print(f"Ошибка во время простоя микрофона: {errors[0]}")
+
+
+def check_command_routing() -> None:
+    commands = import_module("commands")
+    calls: list[tuple[str, str | None]] = []
+    spoken: list[str] = []
+
+    original_create = commands.create_and_open_file
+    original_speak = commands.speak
+
+    def fake_create(kind: str, name: str | None = None) -> str:
+        calls.append((kind, name))
+        return os.path.join(commands.CREATED_FILES_DIR, f"test.{ {'word': 'docx', 'excel': 'xlsx'}.get(kind, 'txt') }")
+
+    def fake_speak(_tts_model, _silence, text: str) -> None:
+        spoken.append(text)
+
+    commands.create_and_open_file = fake_create
+    commands.speak = fake_speak
+    try:
+        for phrase in ("дай ворот документ", "создай борт документ", "создай документ"):
+            before = len(calls)
+            handled = commands.handle_create_file(phrase, None, None)
+            if not handled or len(calls) == before or calls[-1][0] != "word":
+                raise AssertionError(f"Команда не распознана как Word/docx: {phrase}")
+
+        for phrase in ("да иксэль таблицу", "дай эксель таблицу", "создай иксэль таблицу"):
+            before = len(calls)
+            handled = commands.handle_create_file(phrase, None, None)
+            if not handled or len(calls) == before or calls[-1][0] != "excel":
+                raise AssertionError(f"Команда не распознана как Excel/xlsx: {phrase}")
+    finally:
+        commands.create_and_open_file = original_create
+        commands.speak = original_speak
+
+    print()
+    print("Проверка команд: ok")
+    print("Ослышки Word и Excel уходят в создание .docx/.xlsx, а не в LLM.")
+
+
+def run_memory_profile(args: argparse.Namespace) -> None:
+    print("=== Диагностика памяти JARVIS ===")
+    print(f"Python: {sys.executable}")
+    print(f"PID: {os.getpid()}")
+    print(f"Рабочая папка: {os.getcwd()}")
+    private = private_mb()
+    if private is not None:
+        print(f"Стартовая память: RSS {memory_mb():.1f} МБ, private {private:.1f} МБ")
+    else:
+        print(f"Стартовая память: RSS {memory_mb():.1f} МБ")
+
+    print_step_header()
+    measure("Базовый процесс", lambda: None)
+
+    config = measure("Импорт config", lambda: import_module("config"), keep_as="config")
+    if config is not None:
+        print(
+            "Настройки: "
+            f"STT_MIN_AUDIO_RMS={config.STT_MIN_AUDIO_RMS}, "
+            f"TTS_WARMUP_ENABLED={config.TTS_WARMUP_ENABLED}, "
+            f"TTS_PUT_ACCENT={config.TTS_PUT_ACCENT}, "
+            f"TTS_PUT_YO={config.TTS_PUT_YO}"
         )
-        elapsed = time.time() - start_time
-        answer = response.choices[0].message.content.strip()
-        return True, elapsed, answer
-    except Exception as e:
-        elapsed = time.time() - start_time
-        return False, elapsed, str(e)
+
+    tts_module = measure("Импорт tts (torch/numpy/sounddevice)", lambda: import_module("tts"), keep_as="tts_module")
+    stt_module = measure("Импорт stt (vosk/sounddevice)", lambda: import_module("stt"), keep_as="stt_module")
+    commands_module = measure("Импорт commands", lambda: import_module("commands"), keep_as="commands_module")
+    measure("Импорт assistant_worker/PyQt", lambda: import_module("assistant_worker"), keep_as="worker_module")
+
+    if not args.skip_main:
+        measure("Импорт main GUI", lambda: import_module("main"), keep_as="main_module")
+
+    if args.check_commands and commands_module is not None:
+        measure("Проверка маршрутизации команд", check_command_routing)
+
+    stt_model = None
+    listener = None
+    stop_event = threading.Event()
+
+    if not args.skip_stt and stt_module is not None:
+        stt_model = measure("Загрузка STT модели Vosk", stt_module.initialize_stt, keep_as="stt_model")
+        if stt_model is not None:
+            listener = measure(
+                "Создание SpeechListener/recognizer",
+                lambda: stt_module.SpeechListener(stt_model, stop_event=stop_event),
+                keep_as="speech_listener",
+            )
+
+    if not args.skip_tts and tts_module is not None:
+        tts_pair = measure("Загрузка TTS модели Silero", tts_module.initialize_tts, keep_as="tts_pair")
+        if tts_pair is not None and not args.skip_warmup:
+            tts_model, silence = tts_pair
+            measure("Прогрев TTS", lambda: tts_module.warmup_tts(tts_model, silence))
+        if tts_pair is not None and not args.skip_first_synth:
+            tts_model, _ = tts_pair
+            measure("Первый синтез TTS без звука", lambda: tts_module.synthesize_tts(tts_model, "ассистент готов"))
+            measure("Повторный синтез TTS без звука", lambda: tts_module.synthesize_tts(tts_model, "слушаю"))
+
+    if listener is not None and args.idle_seconds > 0:
+        profile_idle_listener(listener, stop_event, args.idle_seconds, args.sample_interval)
+
+    print()
+    print("=== Итог ===")
+    private = private_mb()
+    if private is not None:
+        print(f"Финальная память: RSS {memory_mb():.1f} МБ, private {private:.1f} МБ")
+    else:
+        print(f"Финальная память: RSS {memory_mb():.1f} МБ")
+    print("Смотрите строки с самым большим 'Рост, МБ' и рост RSS в простое микрофона.")
 
 
-# ---------- ГЛАВНАЯ ФУНКЦИЯ ТЕСТИРОВАНИЯ ----------
-def main():
-    print("=== Тест БЕСПЛАТНЫХ Vision-моделей OpenRouter ===\n")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Профилирование памяти JARVIS по этапам запуска.")
+    parser.add_argument("--idle-seconds", type=int, default=60, help="Сколько секунд слушать микрофон в простое.")
+    parser.add_argument("--sample-interval", type=int, default=10, help="Интервал печати памяти в простое.")
+    parser.add_argument("--skip-stt", action="store_true", help="Не загружать Vosk/STT.")
+    parser.add_argument("--skip-tts", action="store_true", help="Не загружать Silero/TTS.")
+    parser.add_argument("--skip-warmup", action="store_true", help="Не делать прогрев TTS.")
+    parser.add_argument("--skip-first-synth", action="store_true", help="Не измерять первый реальный TTS-синтез.")
+    parser.add_argument("--skip-main", action="store_true", help="Не импортировать main.py/QtWidgets.")
+    parser.add_argument("--check-commands", action="store_true", help="Проверить ослышки команд создания Word/Excel.")
+    return parser
 
-    # 1. Инициализация клиента
-    api_key = get_secret(OPENROUTER_API_KEY_SECRET)
-    if not api_key:
-        raise RuntimeError("OpenRouter API key не задан. Сначала сохраните ключ в приложении.")
-    client = OpenAI(base_url=OPENROUTER_BASE_URL, api_key=api_key)
-    print("✅ Клиент инициализирован\n")
 
-    # 2. Подготовка изображения
-    image_bytes = create_test_image()
-    image_data_uri = encode_image_to_base64(image_bytes)
-    print("✅ Тестовое изображение подготовлено\n")
-
-    prompt = "Опиши, что нарисовано на картинке, в 10 словах."
-
-    # 3. Тестирование каждой модели
-    print("Результаты тестирования бесплатных моделей:")
-    print("-" * 60)
-
-    for model in FREE_VISION_MODELS:
-        print(f"Тест: {model}")
-        success, elapsed, result = test_free_model(client, model, prompt, image_data_uri)
-
-        if success:
-            print(f"  ✅ УСПЕХ! Время: {elapsed:.2f} сек.")
-            print(f"  Ответ: {result[:100]}...")
-        else:
-            print(f"  ❌ ОШИБКА! Время: {elapsed:.2f} сек.")
-            print(f"  Текст ошибки: {result[:100]}...")
-        print()
-
-    print("-" * 60)
-    print("=== Тест завершён ===")
+def main() -> None:
+    args = build_parser().parse_args()
+    run_memory_profile(args)
 
 
 if __name__ == "__main__":

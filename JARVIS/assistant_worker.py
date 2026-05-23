@@ -1,3 +1,4 @@
+#assistant_worker
 import threading
 
 from PyQt6.QtCore import QThread, pyqtSignal

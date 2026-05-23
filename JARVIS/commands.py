@@ -22,6 +22,50 @@ FILE_REGISTRY_PATH = os.path.join(BASE_DIR, "file_registry.json")
 CREATED_FILES_DIR = os.path.join(os.path.expanduser("~"), "Documents", "JARVIS")
 
 _pyautogui = None
+CREATE_FILE_ACTIONS = (
+    "создай",
+    "создать",
+    "новый файл",
+    "новый документ",
+    "сделай файл",
+    "сделай документ",
+    "открой новый",
+)
+WORD_FILE_HINTS = (
+    "ворд",
+    "word",
+    "ворт",
+    "вор",
+    "ворот",
+    "борт",
+    "борд",
+    "docx",
+    "обычный документ",
+    "офисный документ",
+    "документ ворд",
+    "документ word",
+)
+EXCEL_FILE_HINTS = (
+    "эксель",
+    "эксэл",
+    "эксэль",
+    "ексель",
+    "excel",
+    "иксель",
+    "иксэл",
+    "иксэль",
+    "таблица",
+    "таблицу",
+    "xlsx",
+)
+TEXT_FILE_HINTS = (
+    "текстовый",
+    "текстовой",
+    "текстовый документ",
+    "текстовой документ",
+    "txt",
+    "блокнот",
+)
 
 
 def speak(tts_model, silence, text: str):
@@ -97,7 +141,7 @@ def _extract_requested_filename(cmd: str, default_name: str) -> str:
         return default_name
 
     name = match.group(1).strip()
-    name = re.sub(r"\b(?:ворд|word|эксель|excel|иксель|таблица|таблицу|текстовый|текстовой|документ|файл)\b", "", name)
+    name = re.sub(r"\b(?:ворд|word|ворт|вор|ворот|борт|борд|эксель|excel|иксель|таблица|таблицу|текстовый|текстовой|документ|файл)\b", "", name)
     return _sanitize_filename(name)
 
 def _create_minimal_docx(path: str, title: str) -> None:
@@ -174,23 +218,32 @@ def create_and_open_file(kind: str, name: str | None = None) -> str:
     return path
 
 def handle_create_file(cmd: str, tts_model, silence) -> bool:
-    if not any(k in cmd for k in ("создай", "создать", "новый файл", "новый документ", "сделай файл")):
+    has_create_action = any(k in cmd for k in CREATE_FILE_ACTIONS)
+    has_word_hint = any(k in cmd for k in WORD_FILE_HINTS)
+    has_excel_hint = any(k in cmd for k in EXCEL_FILE_HINTS)
+    has_text_hint = any(k in cmd for k in TEXT_FILE_HINTS)
+
+    # Vosk часто слышит "создай ворд документ" как "дай ворот/борт документ",
+    # а "создай эксель таблицу" как "дай/да иксэль таблицу".
+    has_misheard_word_create = cmd.startswith("дай ") and has_word_hint and "документ" in cmd
+    has_misheard_excel_create = cmd.startswith(("дай ", "да ")) and has_excel_hint
+    if not (has_create_action or has_misheard_word_create or has_misheard_excel_create):
         return False
 
-    if any(k in cmd for k in ("ворд", "word", "ворт", "вор", "docx", "документ ворд")):
-        kind = "word"
-        default_name = "Новый документ"
-        spoken_kind = "ворд документ"
-    elif any(k in cmd for k in ("эксель", "excel", "иксель", "таблица", "таблицу", "xlsx")):
+    if has_excel_hint:
         kind = "excel"
         default_name = "Новая таблица"
         spoken_kind = "эксель таблица"
-    elif any(k in cmd for k in ("текстовый", "текстовой", "текстовый документ", "текстовой документ", "txt", "блокнот")):
+    elif has_text_hint:
         kind = "text"
         default_name = "Новый текстовый документ"
         spoken_kind = "текстовый документ"
+    elif has_word_hint or "документ" in cmd:
+        kind = "word"
+        default_name = "Новый документ"
+        spoken_kind = "ворд документ"
     else:
-        speak(tts_model, silence, "Уточните тип файла: текстовый документ, ворд документ или эксель таблица.")
+        speak(tts_model, silence, "Уточните тип файла: скажите создать документ, создать таблицу или создать текстовый файл.")
         return True
 
     filename = _extract_requested_filename(cmd, default_name)

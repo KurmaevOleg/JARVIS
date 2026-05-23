@@ -1,7 +1,6 @@
 import os
 import queue
 import time
-import gc
 import audioop
 import vosk
 import sounddevice as sd
@@ -11,7 +10,6 @@ from config import (
     SR_STT,
     BLOCKSIZE,
     STT_MIN_AUDIO_RMS,
-    STT_RECOGNIZER_RESET_SECONDS,
     STT_SILENCE_TAIL_BLOCKS,
 )
 import tts
@@ -32,7 +30,6 @@ class SpeechListener:
         self.queue = queue.Queue(maxsize=4)
         self.recognizer = vosk.KaldiRecognizer(model, SR_STT)
         self.stream = None
-        self._last_reset_at = time.monotonic()
         self._voice_active = False
         self._silence_tail_blocks = 0
 
@@ -60,6 +57,10 @@ class SpeechListener:
             self.queue.put_nowait(data)
         except queue.Full:
             self._clear_queue()
+            try:
+                self.queue.put_nowait(data)
+            except queue.Full:
+                pass
 
     def _clear_queue(self):
         while not self.queue.empty():
@@ -68,18 +69,10 @@ class SpeechListener:
             except queue.Empty:
                 break
 
-    def _reset_recognizer(self):
-        try:
-            if self.recognizer is not None:
-                self.recognizer.FinalResult()
-        except Exception:
-            pass
-        self.recognizer = vosk.KaldiRecognizer(self.model, SR_STT)
+    def _finish_utterance(self):
         self._clear_queue()
-        self._last_reset_at = time.monotonic()
         self._voice_active = False
         self._silence_tail_blocks = 0
-        gc.collect()
 
     def __enter__(self):
         self.stream = sd.RawInputStream(
@@ -115,30 +108,19 @@ class SpeechListener:
             try:
                 data = self.queue.get(timeout=0.1)
             except queue.Empty:
-                if time.monotonic() - self._last_reset_at >= STT_RECOGNIZER_RESET_SECONDS:
-                    self._reset_recognizer()
-                    if DEBUG_STT:
-                        print("STT recognizer idle reset")
                 continue
 
             if self.should_stop():
                 return ""
 
             if tts.is_speaking.is_set():
-                self._clear_queue()
-                self._reset_recognizer()
-                return ""
-
-            if time.monotonic() - self._last_reset_at >= STT_RECOGNIZER_RESET_SECONDS:
-                self._reset_recognizer()
-                if DEBUG_STT:
-                    print("STT recognizer reset")
+                self._finish_utterance()
                 return ""
 
             if self.recognizer.AcceptWaveform(data):
                 result = json.loads(self.recognizer.Result())
                 text = result.get('text', '').lower().strip()
-                self._reset_recognizer()
+                self._finish_utterance()
                 if text:
                     if DEBUG_STT:
                         print(f"Распознано: {text}")
