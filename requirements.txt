@@ -1,5 +1,4 @@
 mss
-numpy
 openai
 keyring
 Pillow
@@ -9,6 +8,5 @@ pyperclip
 requests
 schedule
 sounddevice
-torch
 urllib3
 vosk

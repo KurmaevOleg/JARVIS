@@ -10,6 +10,7 @@ from config import (
     SR_STT,
     BLOCKSIZE,
     STT_MIN_AUDIO_RMS,
+    STT_QUEUE_MAX_BLOCKS,
     STT_SILENCE_TAIL_BLOCKS,
 )
 import tts
@@ -27,7 +28,7 @@ class SpeechListener:
     def __init__(self, model, stop_event=None):
         self.model = model
         self.stop_event = stop_event
-        self.queue = queue.Queue(maxsize=4)
+        self.queue = queue.Queue(maxsize=STT_QUEUE_MAX_BLOCKS)
         self.recognizer = vosk.KaldiRecognizer(model, SR_STT)
         self.stream = None
         self._voice_active = False
@@ -41,6 +42,10 @@ class SpeechListener:
             return
 
         data = bytes(indata)
+        if STT_MIN_AUDIO_RMS <= 0:
+            self._put_audio(data)
+            return
+
         level = audioop.rms(data, 2)
         if level < STT_MIN_AUDIO_RMS:
             if not self._voice_active:
@@ -53,6 +58,9 @@ class SpeechListener:
             self._voice_active = True
             self._silence_tail_blocks = STT_SILENCE_TAIL_BLOCKS
 
+        self._put_audio(data)
+
+    def _put_audio(self, data: bytes):
         try:
             self.queue.put_nowait(data)
         except queue.Full:

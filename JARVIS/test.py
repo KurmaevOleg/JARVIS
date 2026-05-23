@@ -18,6 +18,7 @@ import gc
 import importlib
 import os
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -104,6 +105,16 @@ def private_mb() -> float | None:
     if value is None:
         return None
     return value / MB
+
+
+def process_rss_mb(pid: int | None) -> float | None:
+    if PROCESS is None or not pid:
+        return None
+
+    try:
+        return psutil.Process(pid).memory_info().rss / MB
+    except psutil.Error:
+        return None
 
 
 def print_step_header() -> None:
@@ -261,12 +272,13 @@ def run_memory_profile(args: argparse.Namespace) -> None:
         print(
             "Настройки: "
             f"STT_MIN_AUDIO_RMS={config.STT_MIN_AUDIO_RMS}, "
-            f"TTS_WARMUP_ENABLED={config.TTS_WARMUP_ENABLED}, "
-            f"TTS_PUT_ACCENT={config.TTS_PUT_ACCENT}, "
-            f"TTS_PUT_YO={config.TTS_PUT_YO}"
+            f"BLOCKSIZE={config.BLOCKSIZE}, "
+            f"STT_QUEUE_MAX_BLOCKS={config.STT_QUEUE_MAX_BLOCKS}, "
+            f"TTS_VOICE_NAME={config.TTS_VOICE_NAME}, "
+            f"TTS_MAX_CHARS={config.TTS_MAX_CHARS}"
         )
 
-    tts_module = measure("Импорт tts (torch/numpy/sounddevice)", lambda: import_module("tts"), keep_as="tts_module")
+    tts_module = measure("Импорт tts (Microsoft OneCore)", lambda: import_module("tts"), keep_as="tts_module")
     stt_module = measure("Импорт stt (vosk/sounddevice)", lambda: import_module("stt"), keep_as="stt_module")
     commands_module = measure("Импорт commands", lambda: import_module("commands"), keep_as="commands_module")
     measure("Импорт assistant_worker/PyQt", lambda: import_module("assistant_worker"), keep_as="worker_module")
@@ -291,14 +303,25 @@ def run_memory_profile(args: argparse.Namespace) -> None:
             )
 
     if not args.skip_tts and tts_module is not None:
-        tts_pair = measure("Загрузка TTS модели Silero", tts_module.initialize_tts, keep_as="tts_pair")
-        if tts_pair is not None and not args.skip_warmup:
-            tts_model, silence = tts_pair
-            measure("Прогрев TTS", lambda: tts_module.warmup_tts(tts_model, silence))
-        if tts_pair is not None and not args.skip_first_synth:
-            tts_model, _ = tts_pair
-            measure("Первый синтез TTS без звука", lambda: tts_module.synthesize_tts(tts_model, "ассистент готов"))
-            measure("Повторный синтез TTS без звука", lambda: tts_module.synthesize_tts(tts_model, "слушаю"))
+        tts_engine = measure("Инициализация TTS Microsoft Pavel", tts_module.initialize_tts, keep_as="tts_engine")
+        if tts_engine is not None and not args.skip_first_synth:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+            tmp_path = tmp.name
+            tmp.close()
+            try:
+                measure(
+                    "Пробный синтез TTS без проигрывания",
+                    lambda: tts_module.synthesize_tts(tts_engine, "ассистент готов", tmp_path),
+                )
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            helper = getattr(tts_engine, "_process", None)
+            helper_rss = process_rss_mb(getattr(helper, "pid", None))
+            if helper_rss is not None:
+                print(f"TTS helper PowerShell RSS: {helper_rss:.1f} МБ")
 
     if listener is not None and args.idle_seconds > 0:
         profile_idle_listener(listener, stop_event, args.idle_seconds, args.sample_interval)
@@ -318,9 +341,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--idle-seconds", type=int, default=60, help="Сколько секунд слушать микрофон в простое.")
     parser.add_argument("--sample-interval", type=int, default=10, help="Интервал печати памяти в простое.")
     parser.add_argument("--skip-stt", action="store_true", help="Не загружать Vosk/STT.")
-    parser.add_argument("--skip-tts", action="store_true", help="Не загружать Silero/TTS.")
-    parser.add_argument("--skip-warmup", action="store_true", help="Не делать прогрев TTS.")
-    parser.add_argument("--skip-first-synth", action="store_true", help="Не измерять первый реальный TTS-синтез.")
+    parser.add_argument("--skip-tts", action="store_true", help="Не инициализировать Microsoft Pavel TTS.")
+    parser.add_argument("--skip-first-synth", action="store_true", help="Не измерять пробный TTS-синтез.")
     parser.add_argument("--skip-main", action="store_true", help="Не импортировать main.py/QtWidgets.")
     parser.add_argument("--check-commands", action="store_true", help="Проверить ослышки команд создания Word/Excel.")
     return parser
