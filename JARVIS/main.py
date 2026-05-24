@@ -508,7 +508,7 @@ class MainWindow(QMainWindow):
         keywords_text, ok = QInputDialog.getText(
             self,
             "Ключевые слова",
-            "Введите ключевые слова через запятую, например: дискорд, дс, дис",
+            "Введите ключевые слова через запятую, например: музыка, рок, звуки",
         )
         if not ok:
             if from_voice_command and self.worker:

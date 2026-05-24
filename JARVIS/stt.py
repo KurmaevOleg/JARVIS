@@ -2,6 +2,8 @@ import os
 import queue
 import time
 import audioop
+from collections import deque
+
 import vosk
 import sounddevice as sd
 import json
@@ -10,12 +12,18 @@ from config import (
     SR_STT,
     BLOCKSIZE,
     STT_MIN_AUDIO_RMS,
+    STT_NOISE_RMS_ALPHA,
+    STT_NOISE_RMS_MULTIPLIER,
+    STT_PRE_ROLL_BLOCKS,
     STT_QUEUE_MAX_BLOCKS,
     STT_SILENCE_TAIL_BLOCKS,
+    STT_START_TRIGGER_BLOCKS,
+    STT_VAD_ENABLED,
 )
 import tts
 
 DEBUG_STT = os.getenv("JARVIS_DEBUG_STT", "").lower() in ("1", "true", "yes")
+_END_OF_UTTERANCE = object()
 
 
 def initialize_stt():
@@ -33,6 +41,11 @@ class SpeechListener:
         self.stream = None
         self._voice_active = False
         self._silence_tail_blocks = 0
+        self._noise_rms = float(STT_MIN_AUDIO_RMS)
+        self._last_rms = 0
+        self._last_threshold = STT_MIN_AUDIO_RMS
+        self._pre_roll = deque(maxlen=max(0, STT_PRE_ROLL_BLOCKS))
+        self._speech_start_blocks = 0
 
     def should_stop(self) -> bool:
         return self.stop_event is not None and self.stop_event.is_set()
@@ -42,23 +55,59 @@ class SpeechListener:
             return
 
         data = bytes(indata)
-        if STT_MIN_AUDIO_RMS <= 0:
+        if not STT_VAD_ENABLED or STT_MIN_AUDIO_RMS <= 0:
             self._put_audio(data)
             return
 
         level = audioop.rms(data, 2)
-        if level < STT_MIN_AUDIO_RMS:
+        self._last_rms = level
+        threshold = self._current_threshold()
+        self._last_threshold = threshold
+
+        if level < threshold:
+            self._speech_start_blocks = 0
+            self._remember_background(level)
             if not self._voice_active:
+                self._pre_roll.append(data)
                 return
             if self._silence_tail_blocks <= 0:
                 self._voice_active = False
+                self._pre_roll.clear()
+                self._put_end_marker()
                 return
             self._silence_tail_blocks -= 1
         else:
+            if not self._voice_active:
+                self._speech_start_blocks += 1
+                self._pre_roll.append(data)
+                if self._speech_start_blocks < STT_START_TRIGGER_BLOCKS:
+                    return
+                self._flush_pre_roll()
+                self._speech_start_blocks = 0
+                self._voice_active = True
+                self._silence_tail_blocks = STT_SILENCE_TAIL_BLOCKS
+                return
             self._voice_active = True
             self._silence_tail_blocks = STT_SILENCE_TAIL_BLOCKS
 
         self._put_audio(data)
+
+    def _current_threshold(self) -> int:
+        adaptive = int(self._noise_rms * STT_NOISE_RMS_MULTIPLIER)
+        return max(STT_MIN_AUDIO_RMS, adaptive)
+
+    def _remember_background(self, level: int):
+        if self._voice_active:
+            return
+        if self._noise_rms <= 0:
+            self._noise_rms = float(level)
+            return
+        alpha = min(1.0, max(0.0, STT_NOISE_RMS_ALPHA))
+        self._noise_rms = (self._noise_rms * (1.0 - alpha)) + (level * alpha)
+
+    def _flush_pre_roll(self):
+        while self._pre_roll:
+            self._put_audio(self._pre_roll.popleft())
 
     def _put_audio(self, data: bytes):
         try:
@@ -70,6 +119,16 @@ class SpeechListener:
             except queue.Full:
                 pass
 
+    def _put_end_marker(self):
+        try:
+            self.queue.put_nowait(_END_OF_UTTERANCE)
+        except queue.Full:
+            self._clear_queue()
+            try:
+                self.queue.put_nowait(_END_OF_UTTERANCE)
+            except queue.Full:
+                pass
+
     def _clear_queue(self):
         while not self.queue.empty():
             try:
@@ -77,10 +136,21 @@ class SpeechListener:
             except queue.Empty:
                 break
 
-    def _finish_utterance(self):
-        self._clear_queue()
+    def _finish_utterance(self, clear_queue: bool = True):
+        if clear_queue:
+            self._clear_queue()
         self._voice_active = False
         self._silence_tail_blocks = 0
+        self._pre_roll.clear()
+        self._speech_start_blocks = 0
+
+    @staticmethod
+    def _text_from_result(raw: str) -> str:
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            return ""
+        return result.get('text', '').lower().strip()
 
     def __enter__(self):
         self.stream = sd.RawInputStream(
@@ -125,9 +195,17 @@ class SpeechListener:
                 self._finish_utterance()
                 return ""
 
+            if data is _END_OF_UTTERANCE:
+                text = self._text_from_result(self.recognizer.Result())
+                self._finish_utterance(clear_queue=False)
+                if text:
+                    if DEBUG_STT:
+                        print(f"Распознано: {text}")
+                    return text
+                continue
+
             if self.recognizer.AcceptWaveform(data):
-                result = json.loads(self.recognizer.Result())
-                text = result.get('text', '').lower().strip()
+                text = self._text_from_result(self.recognizer.Result())
                 self._finish_utterance()
                 if text:
                     if DEBUG_STT:

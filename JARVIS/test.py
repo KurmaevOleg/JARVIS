@@ -286,6 +286,10 @@ def run_memory_profile(args: argparse.Namespace) -> None:
             f"STT_MIN_AUDIO_RMS={config.STT_MIN_AUDIO_RMS}, "
             f"BLOCKSIZE={config.BLOCKSIZE}, "
             f"STT_QUEUE_MAX_BLOCKS={config.STT_QUEUE_MAX_BLOCKS}, "
+            f"STT_VAD_ENABLED={config.STT_VAD_ENABLED}, "
+            f"STT_NOISE_RMS_MULTIPLIER={config.STT_NOISE_RMS_MULTIPLIER}, "
+            f"STT_PRE_ROLL_BLOCKS={config.STT_PRE_ROLL_BLOCKS}, "
+            f"STT_START_TRIGGER_BLOCKS={config.STT_START_TRIGGER_BLOCKS}, "
             f"TTS_VOICE_NAME={config.TTS_VOICE_NAME}, "
             f"TTS_MAX_CHARS={config.TTS_MAX_CHARS}"
         )
