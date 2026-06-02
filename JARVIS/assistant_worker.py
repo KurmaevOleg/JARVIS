@@ -1,9 +1,16 @@
 #assistant_worker
+import gc
 import threading
+import time
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 import commands as commands_module
+from config import (
+    STT_IDLE_RESTART_SECONDS,
+    STT_LISTEN_POLL_SECONDS,
+    STT_RESTART_AFTER_RESPONSES,
+)
 from commands import process_command, register_file
 from keyboard_layout import switch_to_english_layout
 from stt import SpeechListener, initialize_stt
@@ -40,6 +47,10 @@ class AssistantWorker(QThread):
         self._awake = threading.Event()
         self._add_file_event = threading.Event()
         self._add_file_result = None
+        self._reply_count_since_stt_restart = 0
+        self._stt_restart_requested = False
+        self._stt_restart_reason = ""
+        self._last_stt_activity = time.monotonic()
 
     def request_stop(self):
         self._stop_event.set()
@@ -63,10 +74,36 @@ class AssistantWorker(QThread):
     def _speak_proxy(self, engine, _silence, text: str):
         self.log.emit(f"Ассистент: {text}")
         self.status.emit("Говорю")
+        self._count_assistant_reply()
         tts_speak(engine, None, text)
 
     def _timer_speak_proxy(self, text: str):
         self._speak_proxy(self._tts_engine, None, text)
+
+    def _count_assistant_reply(self):
+        if STT_RESTART_AFTER_RESPONSES <= 0:
+            return
+        self._reply_count_since_stt_restart += 1
+        if self._reply_count_since_stt_restart >= STT_RESTART_AFTER_RESPONSES:
+            self._request_stt_restart(f"{STT_RESTART_AFTER_RESPONSES} ответа")
+
+    def _request_stt_restart(self, reason: str):
+        if self._stt_restart_requested:
+            return
+        self._stt_restart_requested = True
+        self._stt_restart_reason = reason
+        self.log.emit(f"STT будет перезапущен: {reason}.")
+
+    def _reset_stt_restart_window(self):
+        self._reply_count_since_stt_restart = 0
+        self._stt_restart_requested = False
+        self._stt_restart_reason = ""
+        self._last_stt_activity = time.monotonic()
+
+    def _idle_stt_restart_due(self) -> bool:
+        if STT_IDLE_RESTART_SECONDS <= 0:
+            return False
+        return time.monotonic() - self._last_stt_activity >= STT_IDLE_RESTART_SECONDS
 
     def provide_add_file_result(self, result: dict | None):
         self._add_file_result = result
@@ -119,57 +156,93 @@ class AssistantWorker(QThread):
             self._speak_proxy(self._tts_engine, None, "Ассистент готов. Скажите Джарвис, чтобы обратиться ко мне.")
             self.status.emit("Ожидаю Джарвис")
             self.awake_changed.emit(False)
+            self._reset_stt_restart_window()
 
-            with SpeechListener(self._stt_model, stop_event=self._stop_event) as listener:
-                while not self._stop_event.is_set():
-                    text = listener.listen_once()
+            keep_worker_running = True
+            while keep_worker_running and not self._stop_event.is_set():
+                restart_reason = ""
+                self._reset_stt_restart_window()
 
-                    if self._stop_event.is_set():
-                        break
+                with SpeechListener(self._stt_model, stop_event=self._stop_event) as listener:
+                    while not self._stop_event.is_set():
+                        if self._stt_restart_requested:
+                            restart_reason = self._stt_restart_reason or "плановый перезапуск"
+                            break
 
-                    if not text:
-                        continue
+                        text = listener.listen_once(timeout_seconds=STT_LISTEN_POLL_SECONDS)
 
-                    has_wake_word, command_text = strip_wake_word(text)
+                        if self._stop_event.is_set():
+                            break
 
-                    if not has_wake_word and not self._awake.is_set():
-                        self.status.emit("Ожидаю Джарвис")
-                        continue
-
-                    self.log.emit(f"Вы: {text if has_wake_word else command_text}")
-
-                    if has_wake_word:
-                        self._awake.set()
-                        self.awake_changed.emit(True)
-                        if not command_text:
-                            self._speak_proxy(self._tts_engine, None, "Слушаю.")
-                            self.status.emit("Слушаю команду")
+                        if not text:
+                            if self._idle_stt_restart_due():
+                                self._request_stt_restart(f"тишина {int(STT_IDLE_RESTART_SECONDS)} сек")
+                                restart_reason = self._stt_restart_reason
+                                break
                             continue
 
-                    if any(k in command_text for k in SLEEP_COMMANDS):
-                        self._awake.clear()
-                        self.awake_changed.emit(False)
+                        self._last_stt_activity = time.monotonic()
+                        has_wake_word, command_text = strip_wake_word(text)
 
-                    self.status.emit("Обрабатываю")
+                        if not has_wake_word and not self._awake.is_set():
+                            self.status.emit("Ожидаю Джарвис")
+                            continue
 
-                    if "добавить файл" in command_text:
-                        self._handle_add_file()
+                        self.log.emit(f"Вы: {text if has_wake_word else command_text}")
+
+                        if has_wake_word:
+                            self._awake.set()
+                            self.awake_changed.emit(True)
+                            if not command_text:
+                                self._speak_proxy(self._tts_engine, None, "Слушаю.")
+                                self.status.emit("Слушаю команду")
+                                if self._stt_restart_requested:
+                                    restart_reason = self._stt_restart_reason
+                                    break
+                                continue
+
+                        if any(k in command_text for k in SLEEP_COMMANDS):
+                            self._awake.clear()
+                            self.awake_changed.emit(False)
+
+                        self.status.emit("Обрабатываю")
+
+                        if "добавить файл" in command_text:
+                            self._handle_add_file()
+                            if self._stt_restart_requested:
+                                restart_reason = self._stt_restart_reason
+                                break
+                            if not self._stop_event.is_set():
+                                self.status.emit("Слушаю команду" if self._awake.is_set() else "Ожидаю Джарвис")
+                            continue
+
+                        keep_running = process_command(
+                            command_text,
+                            self._tts_engine,
+                            None,
+                            self._timer_manager
+                        )
+
+                        if keep_running is False:
+                            keep_worker_running = False
+                            break
+
+                        if self._stt_restart_requested:
+                            restart_reason = self._stt_restart_reason
+                            break
+
                         if not self._stop_event.is_set():
                             self.status.emit("Слушаю команду" if self._awake.is_set() else "Ожидаю Джарвис")
-                        continue
 
-                    keep_running = process_command(
-                        command_text,
-                        self._tts_engine,
-                        None,
-                        self._timer_manager
-                    )
+                del listener
+                gc.collect()
 
-                    if keep_running is False:
-                        break
+                if restart_reason and keep_worker_running and not self._stop_event.is_set():
+                    self.log.emit(f"STT перезапущен: {restart_reason}.")
+                    self.status.emit("Слушаю команду" if self._awake.is_set() else "Ожидаю Джарвис")
+                    continue
 
-                    if not self._stop_event.is_set():
-                        self.status.emit("Слушаю команду" if self._awake.is_set() else "Ожидаю Джарвис")
+                break
 
         except Exception as e:
             self.log.emit(f"Ошибка: {e}")

@@ -168,8 +168,16 @@ class SpeechListener:
             self.stream.__exit__(exc_type, exc, tb)
             self.stream = None
 
-    def listen_once(self) -> str:
+    def listen_once(self, timeout_seconds: float | None = None) -> str:
+        deadline = time.monotonic() + timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
+        got_audio = False
+
+        def timed_out() -> bool:
+            return not got_audio and deadline is not None and time.monotonic() >= deadline
+
         while not self.should_stop() and tts.is_speaking.is_set():
+            if timed_out():
+                return ""
             self._clear_queue()
             time.sleep(0.05)
 
@@ -182,9 +190,14 @@ class SpeechListener:
         while True:
             if self.should_stop():
                 return ""
+            if timed_out():
+                return ""
 
             try:
-                data = self.queue.get(timeout=0.1)
+                wait_time = 0.1
+                if deadline is not None:
+                    wait_time = max(0.01, min(wait_time, deadline - time.monotonic()))
+                data = self.queue.get(timeout=wait_time)
             except queue.Empty:
                 continue
 
@@ -204,6 +217,7 @@ class SpeechListener:
                     return text
                 continue
 
+            got_audio = True
             if self.recognizer.AcceptWaveform(data):
                 text = self._text_from_result(self.recognizer.Result())
                 self._finish_utterance()

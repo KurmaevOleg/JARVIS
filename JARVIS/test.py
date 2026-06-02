@@ -290,6 +290,8 @@ def run_memory_profile(args: argparse.Namespace) -> None:
             f"STT_NOISE_RMS_MULTIPLIER={config.STT_NOISE_RMS_MULTIPLIER}, "
             f"STT_PRE_ROLL_BLOCKS={config.STT_PRE_ROLL_BLOCKS}, "
             f"STT_START_TRIGGER_BLOCKS={config.STT_START_TRIGGER_BLOCKS}, "
+            f"STT_RESTART_AFTER_RESPONSES={config.STT_RESTART_AFTER_RESPONSES}, "
+            f"STT_IDLE_RESTART_SECONDS={config.STT_IDLE_RESTART_SECONDS}, "
             f"TTS_VOICE_NAME={config.TTS_VOICE_NAME}, "
             f"TTS_MAX_CHARS={config.TTS_MAX_CHARS}"
         )
